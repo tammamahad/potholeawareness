@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Pothole Awareness</title>
+
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+  />
+
+  <style>
+    body { margin: 0; font-family: Arial, sans-serif; }
+    #map { height: 100vh; width: 100%; }
+  </style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+  // -----------------------------
+  // Map setup
+  // -----------------------------
+  const map = L.map('map').setView([42.3314, -83.0458], 12);
+
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap contributors'
+  }).addTo(map);
+
+  // Layer to hold all report markers
+  const reportsLayer = L.layerGroup().addTo(map);
+
+  // Store reports client-side for filtering
+  let allReports = [];
+  let minSeverity = 3; // default filter: 3+
+
+  // -----------------------------
+  // Helpers: color coding + marker rendering
+  // -----------------------------
+  function severityColor(sev) {
+    const s = Number(sev);
+    if (s >= 5) return "#d00000";
+    if (s === 4) return "#e85d04";
+    if (s === 3) return "#ffba08";
+    if (s === 2) return "#6a994e";
+    return "#2d6a4f"; // 1
+  }
+
+  function addReportMarker(report) {
+    const sev = Number(report.severity);
+
+    const marker = L.circleMarker([report.lat, report.lng], {
+      radius: 8,
+      color: severityColor(sev),
+      fillColor: severityColor(sev),
+      fillOpacity: 0.85,
+      weight: 2
+    }).addTo(reportsLayer);
+
+    marker.bindPopup(`
+      <b>Pothole Report</b><br>
+      ${report.direction}, ${report.lane}<br>
+      Severity: ${sev}/5<br>
+      Notes: ${report.notes || "—"}<br>
+      <small>${report.created_at}</small>
+    `);
+
+    return marker;
+  }
+
+  // -----------------------------
+  // Status box: count reports in current view
+  // -----------------------------
+  const statusControl = L.control({ position: "topleft" });
+
+  statusControl.onAdd = function () {
+    const div = L.DomUtil.create("div", "status-control");
+    div.style.background = "white";
+    div.style.padding = "10px";
+    div.style.borderRadius = "8px";
+    div.style.boxShadow = "0 2px 10px rgba(0,0,0,0.15)";
+    div.style.fontSize = "12px";
+    div.style.lineHeight = "1.3";
+    div.style.minWidth = "190px";
+    div.innerHTML = `<div><b>Status</b></div><div id="statusText">Loading…</div>`;
+    return div;
+  };
+
+  statusControl.addTo(map);
+
+  // -----------------------------
+  // Legend (Severity 1–5)
+  // -----------------------------
+  const legend = L.control({ position: "bottomright" });
+
+  legend.onAdd = function () {
+    const div = L.DomUtil.create("div", "legend");
+    div.style.background = "white";
+    div.style.padding = "10px";
+    div.style.borderRadius = "8px";
+    div.style.boxShadow = "0 2px 10px rgba(0,0,0,0.15)";
+    div.style.fontSize = "12px";
+    div.style.lineHeight = "1.3";
+
+    function row(color, label) {
+      return `
+        <div style="display:flex; align-items:center; gap:8px; margin:4px 0;">
+          <span style="
+            width:12px; height:12px; border-radius:50%;
+            display:inline-block; background:${color};
+            border:2px solid ${color};
+          "></span>
+          <span>${label}</span>
+        </div>
+      `;
+    }
+
+    div.innerHTML = `
+      <div style="font-weight:bold; margin-bottom:6px;">Pothole Severity</div>
+      ${row(severityColor(1), "1 – barely noticeable")}
+      ${row(severityColor(2), "2 – small bump")}
+      ${row(severityColor(3), "3 – moderate impact")}
+      ${row(severityColor(4), "4 – heavy impact")}
+      ${row(severityColor(5), "5 – vehicle damage likely")}
+    `;
+
+    return div;
+  };
+
+  legend.addTo(map);
+
+  // -----------------------------
+  // Filter control (min severity)
+  // -----------------------------
+  const filterControl = L.control({ position: "topright" });
+
+  filterControl.onAdd = function () {
+    const div = L.DomUtil.create("div", "filter-control");
+    div.style.background = "white";
+    div.style.padding = "10px";
+    div.style.borderRadius = "8px";
+    div.style.boxShadow = "0 2px 10px rgba(0,0,0,0.15)";
+    div.style.fontSize = "12px";
+    div.style.lineHeight = "1.3";
+    div.style.minWidth = "160px";
+
+    div.innerHTML = `
+      <div style="font-weight:bold; margin-bottom:6px;">Filter</div>
+      <label style="display:block;">
+        Min severity:
+        <select id="minSev" style="width:100%; margin-top:4px;">
+          <option value="1">1+</option>
+          <option value="2">2+</option>
+          <option value="3" selected>3+</option>
+          <option value="4">4+</option>
+          <option value="5">5 only</option>
+        </select>
+      </label>
+    `;
+
+    return div;
+  };
+
+  filterControl.addTo(map);
+
+  // -----------------------------
+  // Rendering + status update
+  // -----------------------------
+  function updateStatus() {
+    const bounds = map.getBounds();
+    const filtered = allReports.filter(r => Number(r.severity) >= minSeverity);
+    const inView = filtered.filter(r => bounds.contains([r.lat, r.lng]));
+
+    const status = document.getElementById("statusText");
+    if (status) {
+      status.innerHTML = `
+        Showing <b>${inView.length}</b> report(s) in view<br>
+        Min severity: <b>${minSeverity}+</b>
+      `;
+    }
+  }
+
+  function renderReports() {
+    reportsLayer.clearLayers();
+    allReports
+      .filter(r => Number(r.severity) >= minSeverity)
+      .forEach(r => addReportMarker(r));
+
+    updateStatus();
+  }
+
+  // Update status when user pans/zooms
+  map.on("moveend", updateStatus);
+  map.on("zoomend", updateStatus);
+
+  // Prevent map dragging/zooming when interacting with controls
+  setTimeout(() => {
+    const statusEl = document.querySelector(".status-control");
+    if (statusEl) {
+      L.DomEvent.disableClickPropagation(statusEl);
+      L.DomEvent.disableScrollPropagation(statusEl);
+    }
+
+    const legendEl = document.querySelector(".legend");
+    if (legendEl) {
+      L.DomEvent.disableClickPropagation(legendEl);
+      L.DomEvent.disableScrollPropagation(legendEl);
+    }
+
+    const filterEl = document.querySelector(".filter-control");
+    if (filterEl) {
+      L.DomEvent.disableClickPropagation(filterEl);
+      L.DomEvent.disableScrollPropagation(filterEl);
+
+      const select = filterEl.querySelector("#minSev");
+      if (select) {
+        select.addEventListener("change", () => {
+          minSeverity = Number(select.value);
+          renderReports();
+        });
+      }
+    }
+  }, 0);
+
+  // -----------------------------
+  // Load reports (expiration is handled by backend)
+  // -----------------------------
+  function loadReports() {
+    fetch("/api/reports")
+      .then(res => res.json())
+      .then(reports => {
+        allReports = reports;
+        renderReports();
+      })
+      .catch(err => console.error("Failed to load reports:", err));
+  }
+
+  loadReports();
+
+  // -----------------------------
+  // Report form popup
+  // -----------------------------
+  function escapeHtml(str) {
+    return str.replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    }[c]));
+  }
+
+  let lastClick = null;
+  const formPopup = L.popup({ closeButton: true, autoClose: true });
+
+  map.on("click", (e) => {
+    lastClick = e.latlng;
+
+    const formHtml = `
+      <div style="min-width:240px">
+        <b>Report pothole</b>
+        <div style="font-size:12px; margin:4px 0;">
+          Lat: ${lastClick.lat.toFixed(5)}, Lng: ${lastClick.lng.toFixed(5)}
+        </div>
+
+        <label style="display:block; margin-top:6px;">
+          Direction:
+          <select id="dir">
+            <option value="northbound">Northbound</option>
+            <option value="southbound" selected>Southbound</option>
+            <option value="eastbound">Eastbound</option>
+            <option value="westbound">Westbound</option>
+          </select>
+        </label>
+
+        <label style="display:block; margin-top:6px;">
+          Lane:
+          <select id="lane">
+            <option value="right">Right lane</option>
+            <option value="center">Center lane</option>
+            <option value="left">Left lane</option>
+            <option value="shoulder">Shoulder</option>
+            <option value="unknown">Not sure</option>
+          </select>
+        </label>
+
+        <label style="display:block; margin-top:6px;">
+          Severity:
+          <select id="sev">
+            <option value="1">1 – barely noticeable</option>
+            <option value="2">2 – small bump</option>
+            <option value="3" selected>3 – moderate impact</option>
+            <option value="4">4 – heavy impact</option>
+            <option value="5">5 – vehicle damage likely</option>
+          </select>
+        </label>
+
+        <label style="display:block; margin-top:6px;">
+          Notes (optional):
+          <input id="notes" type="text" placeholder="e.g., near crosswalk" style="width:100%;" />
+        </label>
+
+        <button id="submitReport" style="margin-top:8px; width:100%;">Submit</button>
+      </div>
+    `;
+
+    formPopup.setLatLng(lastClick).setContent(formHtml);
+    map.openPopup(formPopup);
+  });
+
+  // Attach submit handler after popup opens
+  map.on("popupopen", (evt) => {
+    const popupEl = evt.popup.getElement();
+    if (!popupEl) return;
+
+    const btn = popupEl.querySelector("#submitReport");
+    if (!btn) return;
+
+    btn.onclick = () => {
+      const report = {
+        lat: lastClick.lat,
+        lng: lastClick.lng,
+        direction: popupEl.querySelector("#dir").value,
+        lane: popupEl.querySelector("#lane").value,
+        severity: Number(popupEl.querySelector("#sev").value),
+        notes: escapeHtml(popupEl.querySelector("#notes").value.trim())
+      };
+
+      fetch("/api/reports", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(report)
+      })
+        .then(async (res) => {
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || "Failed to save report");
+          return data;
+        })
+        .then((saved) => {
+          map.closePopup();
+
+          // Add to local cache and re-render respecting the filter
+          allReports.unshift(saved);
+          renderReports();
+        })
+        .catch((err) => {
+          console.error(err);
+          alert("Could not save report: " + err.message);
+        });
+    };
+  });
+</script>
+
+</body>
+</html>
