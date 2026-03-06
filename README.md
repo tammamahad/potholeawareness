@@ -4,7 +4,7 @@ A full-stack civic reporting web application where users click directly on a map
 
 ---
 
-## Screenshots
+## Demo
 
 ### Map Overview
 ![Map Overview](screenshots/map-overview.png)
